@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<!--
+  delegate.html — Vista del Delegado
+  ====================================
+  Interfaz para los participantes no-moderadores.
+  
+  Funcionalidades:
+  - Lobby de ingreso con nombre de delegación
+  - Visualización del turno activo y cola
+  - Cronómetro sincronizado con el servidor (usa timer_end_ts)
+  - Botón "Finalizar mi turno" SOLO visible para el poseedor del turno activo
+  - Solicitud de turno Estándar o de Respuesta
+  - Descarga del historial CSV
+  
+  Sincronización del timer:
+  El servidor envía `timer_end_ts` (timestamp Unix float).
+  El cliente calcula: `restante = timer_end_ts - Date.now()/1000`
+  Esto evita drift por latencia de red.
+-->
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Debate Manager — Delegado</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <style>
+    /* Layout específico de la vista delegado */
+    .delegate-grid {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      grid-template-rows: auto 1fr;
+      gap: 1.25rem;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .turno-activo-panel { grid-column: 1; }
+    .mis-controles      { grid-column: 2; grid-row: 1 / 3; }
+    .cola-panel         { grid-column: 1; }
+
+    @media (max-width: 820px) {
+      .delegate-grid { grid-template-columns: 1fr; }
+      .mis-controles { grid-column: 1; grid-row: auto; }
+    }
+
+    /* Panel de controles del delegado */
+    .control-btn-group {
+      display: flex;
+      flex-direction: column;
+      gap: .6rem;
+    }
+
+    /* Destacar cuando es mi turno */
+    .mi-turno-highlight {
+      background: linear-gradient(135deg, rgba(46,204,113,.08), rgba(46,204,113,.03));
+      border-color: var(--emerald-dim) !important;
+    }
+
+    .mi-turno-tag {
+      font-size: .65rem;
+      font-family: var(--font-mono);
+      color: var(--emerald);
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      padding: .15rem .5rem;
+      border-radius: 4px;
+      border: 1px solid var(--emerald-dim);
+      background: rgba(46,204,113,.08);
+      animation: pulse 2s infinite;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════
+     LOBBY — Se oculta al unirse
+════════════════════════════════════════════════════════════ -->
+<div id="lobby-overlay" class="lobby-overlay">
+  <div class="lobby-card fade-in">
+    <div class="seal">⚖️</div>
+    <h2>Sala de Debate</h2>
+    <p>Ingresa el nombre de tu delegación para unirte a la sesión.</p>
+    <div class="input-group">
+      <input
+        id="input-pais"
+        class="input"
+        type="text"
+        placeholder="Ej: República Argentina"
+        maxlength="60"
+        autocomplete="off"
+      >
+      <button class="btn btn-primary btn-lg" onclick="unirseASala()">
+        Ingresar a la Sala
+      </button>
+      <div id="lobby-error" style="color: var(--red); font-size: .8rem; min-height: 1.2rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     APP PRINCIPAL
+════════════════════════════════════════════════════════════ -->
+<div class="app-shell" id="app-main" style="display: none;">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-logo">
+      <div class="crest">⚖</div>
+      <div>
+        <h1>Debate Manager</h1>
+        <div class="subtitle">Sistema de Gestión de Turnos</div>
+      </div>
+    </div>
+    <div class="header-meta">
+      <span class="status-pill" id="conn-status">
+        <span class="dot"></span>
+        <span id="conn-label">Conectando…</span>
+      </span>
+      <span class="badge-role dele" id="pais-badge">—</span>
+      <a href="/descargar-csv" target="_blank" class="btn btn-outline btn-sm" title="Descargar historial CSV">
+        ⬇ CSV
+      </a>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main class="main-content">
+    <div class="delegate-grid">
+
+      <!-- ── Turno Activo ───────────────────────────── -->
+      <div class="panel turno-activo-panel" id="panel-turno-activo">
+
+        <div class="panel-header">
+          <span class="panel-title">Turno Activo</span>
+          <div id="mi-turno-tag" style="display: none;">
+            <span class="mi-turno-tag">✦ Tu turno</span>
+          </div>
+        </div>
+
+        <div class="panel-body">
+
+          <!-- Estado vacío (sin turno activo) -->
+          <div id="sin-turno-activo" class="empty-state">
+            <div class="icon">🏛️</div>
+            <p>La sesión aún no ha comenzado.</p>
+            <p style="margin-top:.3rem; font-size:.8rem;">Solicita un turno para iniciar el debate.</p>
+          </div>
+
+          <!-- Información del turno activo -->
+          <div id="turno-activo-info" style="display: none;">
+            <div class="turno-info">
+              <div>
+                <div class="delegacion-nombre" id="ta-nombre">—</div>
+                <div id="ta-tipo-badge" class="delegacion-tipo tipo-estandar" style="margin-top:.5rem;">
+                  Estándar
+                </div>
+              </div>
+              <div class="timer-block">
+                <div class="timer-display" id="timer-display">–:––</div>
+                <div class="timer-label" id="timer-label">tiempo restante</div>
+              </div>
+            </div>
+            <!-- Barra de progreso del timer -->
+            <div class="timer-progress" style="margin-top: 1rem;">
+              <div class="timer-progress-fill" id="timer-progress-fill"></div>
+            </div>
+          </div>
+
+          <!-- Botón de finalizar (solo visible para el poseedor del turno) -->
+          <div id="btn-finalizar-container" style="display: none; margin-top: 1.25rem;">
+            <button class="btn-finalizar" onclick="finalizarMiTurno()">
+              ✓ Finalizar mi intervención
+            </button>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ── Panel de Controles del Delegado ────────── -->
+      <div class="panel mis-controles">
+
+        <div class="panel-header">
+          <span class="panel-title">Mis Acciones</span>
+        </div>
+
+        <div class="panel-body">
+
+          <div class="control-btn-group">
+            <button
+              id="btn-estandar"
+              class="btn btn-outline"
+              onclick="solicitarTurno('Estándar')"
+            >
+              📋 Turno Estándar
+              <span style="margin-left:auto; font-size:.7rem; color: var(--text-muted);">→ fin de cola</span>
+            </button>
+
+            <button
+              id="btn-respuesta"
+              class="btn btn-success"
+              onclick="solicitarTurno('Respuesta')"
+            >
+              ↩ Turno de Respuesta
+              <span style="margin-left:auto; font-size:.7rem; opacity:.7;">→ prioritario</span>
+            </button>
+          </div>
+
+          <div class="divider" style="margin: 1.25rem 0;">Información</div>
+
+          <!-- Info del delegado -->
+          <div style="font-size: .82rem; color: var(--text-muted); line-height: 1.8;">
+            <div>🌍 <strong style="color: var(--text);" id="info-pais">—</strong></div>
+            <div>🔗 <span id="info-sid" style="font-family: var(--font-mono); font-size: .7rem;">—</span></div>
+            <div>📊 Historial: <span id="info-historial">0</span> turnos</div>
+          </div>
+
+          <div class="divider" style="margin: 1.25rem 0;">Turnos en Cola</div>
+          <div style="font-size:.8rem; color: var(--text-muted);" id="cola-count">
+            Ningún turno pendiente
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Cola de Turnos ─────────────────────────── -->
+      <div class="panel cola-panel">
+
+        <div class="panel-header">
+          <span class="panel-title">Cola de Turnos</span>
+          <span class="hist-count" id="cola-total">0 pendientes</span>
+        </div>
+
+        <div class="panel-body" id="cola-body">
+          <div class="empty-state" style="padding: 1.5rem;">
+            <p>La cola está vacía.</p>
+          </div>
+        </div>
+
+      </div>
+
+    </div><!-- /delegate-grid -->
+  </main>
+
+</div><!-- /app-shell -->
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- ════════════════════════════════════════════════════════════
+     JAVASCRIPT — AppCliente + DelegateView
+════════════════════════════════════════════════════════════ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+/* ─────────────────────────────────────────────────────────
+   AppCliente: Gestiona la conexión y el estado del cliente.
+   DelegateView: Maneja la UI específica del delegado.
+───────────────────────────────────────────────────────── */
+
+// ── Estado local del cliente ─────────────────────────────
+
+const clienteState = {
+  socket:      null,     // Instancia de Socket.IO
+  miSid:       null,     // Nuestro socket ID
+  miPais:      null,     // Nombre de nuestra delegación
+  salaActual:  null,     // Código de la sala
+  esModerador: false,    // Solo para saber si debería redirigir
+  estadoSala:  null,     // Última instantánea recibida del servidor
+};
+
+// ── Timer local ──────────────────────────────────────────
+
+let timerInterval = null;   // setInterval del cronómetro local
+let timerEndTs    = null;   // Timestamp Unix de fin (desde el servidor)
+let timerMaxSecs  = 0;      // Duración máxima del turno actual
+
+// ── Conexión Socket.IO ───────────────────────────────────
+
+/**
+ * conexion(): Inicia la conexión con el servidor Socket.IO.
+ * Se llama automáticamente al cargar la página.
+ */
+function conexion() {
+  // Conecta al servidor en la misma origen (sin necesidad de IP hardcodeada)
+  clienteState.socket = io({ transports: ['websocket', 'polling'] });
+  const sock = clienteState.socket;
+
+  // ── Escuchar eventos del servidor ───────────────────────
+
+  /** Confirmación de conexión física */
+  sock.on('connect', () => {
+    clienteState.miSid = sock.id;
+    document.getElementById('conn-status').classList.add('connected');
+    document.getElementById('conn-label').textContent = 'Conectado';
+    mostrarToast('Conectado al servidor', 'success');
+  });
+
+  /** Desconexión */
+  sock.on('disconnect', () => {
+    document.getElementById('conn-status').classList.remove('connected');
+    document.getElementById('conn-label').textContent = 'Desconectado';
+    mostrarToast('Conexión perdida — intentando reconectar…', 'error');
+  });
+
+  /** Bienvenida: confirma que nos unimos a la sala */
+  sock.on('bienvenida', (data) => {
+    clienteState.miSid       = data.sid;
+    clienteState.miPais      = data.pais;
+    clienteState.salaActual  = data.sala;
+    clienteState.esModerador = data.es_moderador;
+
+    // Si es moderador, redirigir al panel de moderador
+    if (data.es_moderador) {
+      // Guardamos info en sessionStorage para pasarla a moderator.html
+      sessionStorage.setItem('dm_pais', data.pais);
+      sessionStorage.setItem('dm_sala', data.sala);
+      window.location.href = '/moderador';
+      return;
+    }
+
+    // Actualizar UI
+    document.getElementById('app-main').style.display = '';
+    document.getElementById('lobby-overlay').style.display = 'none';
+    document.getElementById('pais-badge').textContent   = data.pais;
+    document.getElementById('info-pais').textContent    = data.pais;
+    document.getElementById('info-sid').textContent     = data.sid.substring(0, 8) + '…';
+
+    mostrarToast(`Bienvenido, ${data.pais}`, 'success');
+  });
+
+  /** Estado completo de la sala — se recibe tras cada cambio */
+  sock.on('estado_sala', (estado) => {
+    clienteState.estadoSala = estado;
+    actualizarVista(estado);
+  });
+
+  /** El timer expiró automáticamente */
+  sock.on('tiempo_agotado', (data) => {
+    mostrarToast('Tiempo agotado — siguiente turno', 'warning');
+  });
+
+  /** Mensaje de error del servidor */
+  sock.on('error', (data) => {
+    mostrarToast(data.msg, 'error');
+  });
+
+  /** Fuimos expulsados */
+  sock.on('expulsado', (data) => {
+    alert(data.msg);
+    window.location.reload();
+  });
+}
+
+// ── Unirse a la Sala ─────────────────────────────────────
+
+/**
+ * unirseSala(): Envía el nombre de delegación al servidor.
+ * Llamado desde el lobby de ingreso.
+ */
+function unirseASala() {
+  const input = document.getElementById('input-pais');
+  const pais  = input.value.trim();
+
+  if (!pais || pais.length < 2) {
+    document.getElementById('lobby-error').textContent = 'Ingresa un nombre de al menos 2 caracteres.';
+    return;
+  }
+
+  document.getElementById('lobby-error').textContent = '';
+
+  clienteState.socket.emit('unirse_sala', {
+    pais: pais,
+    sala: 'MAIN',
+  });
+}
+
+// ── Solicitar Turno ──────────────────────────────────────
+
+/**
+ * solicitarTurno(tipo): Envía solicitud de turno al servidor.
+ * tipo = "Estándar" | "Respuesta"
+ */
+function solicitarTurno(tipo) {
+  if (!clienteState.socket || !clienteState.salaActual) return;
+
+  clienteState.socket.emit('solicitar_turno', { tipo });
+  mostrarToast(`Turno de ${tipo} solicitado`, 'info');
+
+  // Deshabilitar botones brevemente para evitar doble-click
+  document.getElementById('btn-estandar').disabled  = true;
+  document.getElementById('btn-respuesta').disabled = true;
+  setTimeout(() => {
+    document.getElementById('btn-estandar').disabled  = false;
+    document.getElementById('btn-respuesta').disabled = false;
+  }, 1500);
+}
+
+// ── Finalizar mi Turno ───────────────────────────────────
+
+/**
+ * finalizarMiTurno(): Solo disponible cuando es nuestro turno activo.
+ */
+function finalizarMiTurno() {
+  if (!clienteState.socket) return;
+  clienteState.socket.emit('finalizar_turno', {});
+}
+
+// ── Actualizar la Vista (DelegateView.actualizarVista) ───
+
+/**
+ * actualizarVista(estado): Recibe el estado de la sala y repinta la UI.
+ * Este es el método central del cliente: toda la lógica de presentación pasa aquí.
+ */
+function actualizarVista(estado) {
+  const turnoActual   = estado.turno_actual;
+  const esMiTurno     = turnoActual && turnoActual.socket_id === clienteState.miSid;
+  const timerRunning  = estado.timer_running;
+
+  // ── Historial count ──
+  document.getElementById('info-historial').textContent = estado.total_historial || 0;
+
+  // ── Turno activo ─────
+  if (turnoActual) {
+    document.getElementById('sin-turno-activo').style.display    = 'none';
+    document.getElementById('turno-activo-info').style.display   = '';
+
+    document.getElementById('ta-nombre').textContent = turnoActual.pais;
+
+    // Tipo badge
+    const tipoBadge = document.getElementById('ta-tipo-badge');
+    tipoBadge.textContent = turnoActual.tipo;
+    tipoBadge.className = 'delegacion-tipo tipo-' + turnoActual.tipo.toLowerCase().replace('é','e').replace('á','a');
+
+    // Resaltar si es mi turno
+    const panel = document.getElementById('panel-turno-activo');
+    if (esMiTurno) {
+      panel.classList.add('mi-turno-highlight');
+      document.getElementById('mi-turno-tag').style.display = '';
+    } else {
+      panel.classList.remove('mi-turno-highlight');
+      document.getElementById('mi-turno-tag').style.display = 'none';
+    }
+
+    // Botón finalizar — SOLO para el poseedor del turno activo
+    document.getElementById('btn-finalizar-container').style.display = esMiTurno ? '' : 'none';
+
+    // Timer
+    if (turnoActual.tipo === 'Pausa') {
+      // Pausa: sin cronómetro
+      detenerTimer();
+      document.getElementById('timer-display').textContent = '∞';
+      document.getElementById('timer-display').className   = 'timer-display pausa';
+      document.getElementById('timer-label').textContent   = 'pausa activa';
+      document.getElementById('timer-progress-fill').style.width = '100%';
+    } else if (timerRunning && estado.timer_end_ts) {
+      // Iniciar timer sincronizado
+      timerEndTs   = estado.timer_end_ts;
+      timerMaxSecs = turnoActual.duracion_max;
+      iniciarTimer();
+    } else {
+      detenerTimer();
+    }
+
+  } else {
+    // Sin turno activo
+    document.getElementById('sin-turno-activo').style.display   = '';
+    document.getElementById('turno-activo-info').style.display  = 'none';
+    document.getElementById('btn-finalizar-container').style.display = 'none';
+    document.getElementById('mi-turno-tag').style.display       = 'none';
+    document.getElementById('panel-turno-activo').classList.remove('mi-turno-highlight');
+    detenerTimer();
+    document.getElementById('timer-display').textContent = '–:––';
+    document.getElementById('timer-display').className   = 'timer-display sin-turno';
+    document.getElementById('timer-progress-fill').style.width = '0%';
+  }
+
+  // ── Cola de turnos ───
+  renderizarCola(estado.lista_turnos || []);
+
+  // Header status
+  document.getElementById('conn-status').className =
+    'status-pill ' + (turnoActual ? 'active' : 'connected');
+}
+
+// ── Timer Local Sincronizado ─────────────────────────────
+
+/**
+ * iniciarTimer(): Arranca el setInterval del cronómetro local.
+ * La precisión viene de comparar con timerEndTs (dado por el servidor),
+ * lo que evita drift acumulativo.
+ */
+function iniciarTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+
+  timerInterval = setInterval(() => {
+    const ahora     = Date.now() / 1000;               // Timestamp actual en segundos
+    const restante  = Math.max(0, timerEndTs - ahora); // Segundos restantes
+    const display   = document.getElementById('timer-display');
+    const fill      = document.getElementById('timer-progress-fill');
+
+    // Formatear MM:SS
+    const mins = Math.floor(restante / 60);
+    const secs = Math.floor(restante % 60);
+    display.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+    // Colores de urgencia
+    const pct = timerMaxSecs > 0 ? restante / timerMaxSecs : 1;
+    if (pct <= 0.15) {
+      display.className = 'timer-display critical';
+      fill.className    = 'timer-progress-fill critical';
+    } else if (pct <= 0.35) {
+      display.className = 'timer-display warning';
+      fill.className    = 'timer-progress-fill warning';
+    } else {
+      display.className = 'timer-display';
+      fill.className    = 'timer-progress-fill';
+    }
+
+    // Barra de progreso
+    fill.style.width = (pct * 100) + '%';
+
+    // Si llega a 0, el servidor se encargará de la transición
+    if (restante <= 0) {
+      display.textContent = '0:00';
+      detenerTimer();
+    }
+  }, 500);  // Tick cada 500ms para suavidad sin overhead
+}
+
+function detenerTimer() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+}
+
+// ── Renderizar Cola ──────────────────────────────────────
+
+function renderizarCola(cola) {
+  const body = document.getElementById('cola-body');
+  document.getElementById('cola-total').textContent = `${cola.length} pendiente${cola.length !== 1 ? 's' : ''}`;
+  document.getElementById('cola-count').textContent =
+    cola.length > 0 ? `${cola.length} turno${cola.length !== 1 ? 's' : ''} en espera` : 'Ningún turno pendiente';
+
+  if (cola.length === 0) {
+    body.innerHTML = `<div class="empty-state" style="padding:1.5rem;"><p>La cola está vacía.</p></div>`;
+    return;
+  }
+
+  const esMiTurnoEnCola = (t) => t.socket_id === clienteState.miSid;
+
+  body.innerHTML = `<div class="queue-list">` +
+    cola.map((t, i) => {
+      const tipoCss = t.tipo.toLowerCase().replace('é','e').replace('á','a');
+      const esMio   = esMiTurnoEnCola(t);
+      return `
+        <div class="queue-item${esMio ? ' mi-turno-highlight' : ''}">
+          <div class="queue-number">${i + 1}</div>
+          <div class="queue-pais">
+            ${t.pais}
+            ${esMio ? '<span style="font-size:.65rem;color:var(--emerald);margin-left:.4rem;">• tú</span>' : ''}
+          </div>
+          <span class="queue-tipo-badge tipo-${tipoCss}">${t.tipo}</span>
+        </div>
+      `;
+    }).join('') +
+  `</div>`;
+}
+
+// ── Utilidades UI ────────────────────────────────────────
+
+function mostrarToast(msg, tipo = 'info') {
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = `toast ${tipo}`;
+  toast.textContent = msg;
+  container.appendChild(toast);
+  setTimeout(() => toast.remove(), 3500);
+}
+
+// ── Atajo de teclado: Enter en lobby ────────────────────
+
+document.getElementById('input-pais').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') unirseASala();
+});
+
+// ── Inicialización ───────────────────────────────────────
+
+// Si venimos de una sesión guardada, prellenar el input
+const paisGuardado = sessionStorage.getItem('dm_pais');
+if (paisGuardado) {
+  document.getElementById('input-pais').value = paisGuardado;
+  sessionStorage.removeItem('dm_pais');
+}
+
+// Iniciar conexión al cargar la página
+conexion();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,34 @@
+# ============================================================
+# requirements.txt — Dependencias del Debate Manager
+# ============================================================
+# Versiones fijadas para reproducibilidad.
+# Instalar con: pip install -r requirements.txt
+# ============================================================
+
+# ── Servidor Web ──────────────────────────────────────────
+# FastAPI: framework web moderno y asíncrono
+fastapi==0.111.0
+
+# Uvicorn: servidor ASGI de alto rendimiento
+# [standard] incluye soporte para WebSockets y HTTP/2
+uvicorn[standard]==0.30.1
+
+# ── Socket.IO ─────────────────────────────────────────────
+# python-socketio: implementación server-side de Socket.IO
+# Permite comunicación bidireccional en tiempo real
+python-socketio==5.11.2
+
+# python-engineio: capa de transporte subyacente de Socket.IO
+python-engineio==4.9.1
+
+# ── Utilidades HTTP ───────────────────────────────────────
+# httpx: cliente HTTP asíncrono (usado internamente por FastAPI)
+httpx==0.27.0
+
+# ── Serialización ─────────────────────────────────────────
+# pydantic: validación de datos (incluido con FastAPI)
+pydantic==2.7.1
+
+# ── Python Standard Library (no requieren instalación) ────
+# csv, asyncio, datetime, pathlib, uuid, os, logging
+# → Incluidos en Python 3.11 sin necesidad de instalar

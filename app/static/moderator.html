@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<!--
+  moderator.html — Vista del Moderador
+  ======================================
+  Panel de control exclusivo para el primer usuario conectado.
+  
+  Funcionalidades adicionales al delegado:
+  - Listado de delegaciones activas con opciones de gestión
+  - Renombrar delegaciones con nombres inapropiados
+  - Expulsar delegaciones
+  - Avanzar manualmente al siguiente turno
+  - Insertar pausas en tres posiciones de la cola
+  - Asignar turnos a cualquier delegación conectada
+  - Remover turnos de la cola
+  - Descarga del CSV en cualquier momento
+  
+  Seguridad:
+  Aunque la autenticación visual es por orden de conexión,
+  el servidor valida cada acción privilegiada comprobando el SID
+  contra sala.moderator_sid — no hay bypass posible desde el cliente.
+-->
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Debate Manager — Moderador</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <style>
+    /* Layout del moderador: 3 columnas */
+    .mod-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 300px;
+      grid-template-rows: auto auto 1fr;
+      gap: 1.25rem;
+      max-width: 1300px;
+      margin: 0 auto;
+    }
+
+    .panel-turno-activo { grid-column: 1 / 3; }
+    .panel-delegaciones { grid-column: 3; grid-row: 1 / 4; }
+    .panel-cola         { grid-column: 1; }
+    .panel-controles    { grid-column: 2; }
+
+    @media (max-width: 1024px) {
+      .mod-grid { grid-template-columns: 1fr 1fr; }
+      .panel-turno-activo { grid-column: 1 / 3; }
+      .panel-delegaciones { grid-column: 1 / 3; grid-row: auto; }
+      .panel-cola         { grid-column: 1; }
+      .panel-controles    { grid-column: 2; }
+    }
+
+    @media (max-width: 640px) {
+      .mod-grid { grid-template-columns: 1fr; }
+      .panel-turno-activo, .panel-delegaciones,
+      .panel-cola, .panel-controles { grid-column: 1; }
+    }
+
+    /* Sección de controles del moderador */
+    .ctrl-section {
+      margin-bottom: 1.25rem;
+    }
+    .ctrl-label {
+      font-size: .65rem;
+      font-family: var(--font-mono);
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: .5rem;
+      display: block;
+    }
+
+    /* Grid de botones de pausa */
+    .pausa-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: .4rem;
+    }
+
+    /* Fila de asignación de turno */
+    .assign-row {
+      display: flex;
+      gap: .5rem;
+    }
+    .assign-row select {
+      flex: 1;
+      background: var(--surface-2);
+      border: 1px solid var(--border-2);
+      color: var(--text);
+      padding: .5rem .75rem;
+      border-radius: var(--radius);
+      font-family: var(--font-body);
+      font-size: .85rem;
+      outline: none;
+    }
+    .assign-row select:focus { border-color: var(--gold-dim); }
+
+    /* Botones de acción en la cola */
+    .btn-icon {
+      width: 28px;
+      height: 28px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      font-size: .8rem;
+      cursor: pointer;
+      border: 1px solid transparent;
+      background: transparent;
+      transition: all .15s;
+    }
+    .btn-icon:hover { background: var(--surface-2); }
+    .btn-icon.remove { color: var(--red); border-color: var(--red-dim); }
+    .btn-icon.remove:hover { background: rgba(231,76,60,.12); }
+
+    /* Fila de delegación en la tabla */
+    .deleg-actions {
+      display: flex;
+      gap: .35rem;
+      justify-content: flex-end;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ════════════════════════════════════════════════════════════
+     LOBBY — Se oculta al confirmar sesión
+════════════════════════════════════════════════════════════ -->
+<div id="lobby-overlay" class="lobby-overlay">
+  <div class="lobby-card fade-in">
+    <div class="seal">🏛️</div>
+    <h2>Panel del Moderador</h2>
+    <p>Confirma el nombre de tu delegación (o rol de Moderador).</p>
+    <div class="input-group">
+      <input
+        id="input-pais"
+        class="input"
+        type="text"
+        placeholder="Moderador / Secretaría"
+        maxlength="60"
+        autocomplete="off"
+        value="Moderador"
+      >
+      <button class="btn btn-primary btn-lg" onclick="unirseASala()">
+        Acceder como Moderador
+      </button>
+      <div id="lobby-error" style="color: var(--red); font-size: .8rem; min-height: 1.2rem;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════════
+     APP PRINCIPAL
+════════════════════════════════════════════════════════════ -->
+<div class="app-shell" id="app-main" style="display: none;">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="header-logo">
+      <div class="crest">⚖</div>
+      <div>
+        <h1>Debate Manager</h1>
+        <div class="subtitle">Panel del Moderador</div>
+      </div>
+    </div>
+    <div class="header-meta">
+      <span class="status-pill" id="conn-status">
+        <span class="dot"></span>
+        <span id="conn-label">Conectando…</span>
+      </span>
+      <span class="badge-role mod">MODERADOR</span>
+      <a href="/descargar-csv" target="_blank" class="btn btn-primary btn-sm">
+        ⬇ Exportar CSV
+      </a>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main class="main-content">
+    <div class="mod-grid">
+
+      <!-- ── Turno Activo ───────────────────────────── -->
+      <div class="panel panel-turno-activo turno-activo-panel" id="panel-turno-activo">
+
+        <div class="panel-header">
+          <span class="panel-title">Turno Activo</span>
+          <div style="display:flex; gap:.5rem; align-items:center;">
+            <span id="conn-count" class="hist-count">0 conectados</span>
+            <button class="btn btn-outline btn-sm" onclick="llamarSiguiente()" id="btn-siguiente">
+              ⏭ Siguiente
+            </button>
+          </div>
+        </div>
+
+        <div class="panel-body">
+          <!-- Sin turno -->
+          <div id="sin-turno-activo" class="empty-state">
+            <div class="icon">🏛️</div>
+            <p>No hay turno activo.</p>
+            <p style="margin-top:.3rem; font-size:.8rem; color: var(--text-dim);">
+              Usa "Siguiente" o asigna un turno para comenzar.
+            </p>
+          </div>
+
+          <!-- Info del turno -->
+          <div id="turno-activo-info" style="display: none;">
+            <div class="turno-info">
+              <div>
+                <div class="delegacion-nombre" id="ta-nombre">—</div>
+                <div id="ta-tipo-badge" class="delegacion-tipo tipo-estandar" style="margin-top:.5rem;">
+                  Estándar
+                </div>
+                <div style="margin-top:.75rem; font-size:.8rem; color: var(--text-muted); font-family: var(--font-mono);">
+                  SID: <span id="ta-sid">—</span>
+                </div>
+              </div>
+              <div class="timer-block">
+                <div class="timer-display" id="timer-display">–:––</div>
+                <div class="timer-label" id="timer-label">tiempo restante</div>
+                <button
+                  class="btn btn-danger btn-sm"
+                  style="margin-top:.75rem;"
+                  onclick="llamarSiguiente()"
+                >
+                  ⏭ Cortar y Avanzar
+                </button>
+              </div>
+            </div>
+            <div class="timer-progress" style="margin-top:1rem;">
+              <div class="timer-progress-fill" id="timer-progress-fill"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Panel de Delegaciones ──────────────────── -->
+      <div class="panel panel-delegaciones">
+
+        <div class="panel-header">
+          <span class="panel-title">Delegaciones</span>
+          <span class="hist-count" id="deleg-count">0</span>
+        </div>
+
+        <div class="panel-body" style="padding: .75rem;">
+          <div id="tabla-delegaciones-wrapper">
+            <div class="empty-state" style="padding:1.5rem;">
+              <p>Sin delegaciones conectadas.</p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ── Cola de Turnos ─────────────────────────── -->
+      <div class="panel panel-cola">
+
+        <div class="panel-header">
+          <span class="panel-title">Cola de Turnos</span>
+          <span class="hist-count" id="cola-total">0 pendientes</span>
+        </div>
+
+        <div class="panel-body" id="cola-body">
+          <div class="empty-state" style="padding:1.5rem;">
+            <p>La cola está vacía.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ── Panel de Controles del Moderador ──────── -->
+      <div class="panel panel-controles">
+
+        <div class="panel-header">
+          <span class="panel-title">Controles del Moderador</span>
+        </div>
+
+        <div class="panel-body">
+
+          <!-- Insertar Pausa -->
+          <div class="ctrl-section">
+            <span class="ctrl-label">⏸ Insertar Pausa en…</span>
+            <div class="pausa-grid">
+              <button class="btn btn-amber btn-sm" onclick="insertarPausa('after_current')">
+                Ahora
+              </button>
+              <button class="btn btn-amber btn-sm" onclick="insertarPausa('after_responses')">
+                Tras réplicas
+              </button>
+              <button class="btn btn-amber btn-sm" onclick="insertarPausa('end')">
+                Al final
+              </button>
+            </div>
+            <div style="font-size:.72rem; color:var(--text-muted); margin-top:.4rem; line-height:1.4;">
+              "Ahora" inserta justo después del turno en curso.<br>
+              "Tras réplicas" inserta después del bloque de respuestas.<br>
+              "Al final" añade la pausa al final de la cola.
+            </div>
+          </div>
+
+          <div class="divider">Asignar Turno</div>
+
+          <!-- Asignar turno a delegación -->
+          <div class="ctrl-section" style="margin-top:.75rem;">
+            <span class="ctrl-label">🎯 Asignar turno a delegación</span>
+            <div class="assign-row">
+              <select id="select-deleg-asignar">
+                <option value="">— seleccionar —</option>
+              </select>
+            </div>
+            <div style="display:flex; gap:.5rem; margin-top:.5rem;">
+              <button class="btn btn-blue btn-sm" style="flex:1;" onclick="asignarTurno('Estándar')">
+                + Estándar
+              </button>
+              <button class="btn btn-success btn-sm" style="flex:1;" onclick="asignarTurno('Respuesta')">
+                ↩ Respuesta
+              </button>
+            </div>
+          </div>
+
+          <div class="divider">Estado</div>
+
+          <!-- Info de historial -->
+          <div style="font-size:.82rem; color: var(--text-muted); line-height: 2;">
+            <div>📜 Historial: <strong style="color:var(--text);" id="info-historial">0</strong> turnos</div>
+            <div>👥 Conectados: <strong style="color:var(--text);" id="info-conectados">0</strong></div>
+          </div>
+
+        </div>
+      </div>
+
+    </div><!-- /mod-grid -->
+  </main>
+
+</div><!-- /app-shell -->
+
+<!-- Modal Renombrar -->
+<div class="modal-backdrop" id="modal-renombrar">
+  <div class="modal">
+    <h3>✏️ Renombrar Delegación</h3>
+    <p style="font-size:.85rem; color:var(--text-muted); margin-bottom:.75rem;">
+      Ingresa el nuevo nombre para esta delegación.
+    </p>
+    <input id="modal-nombre-input" class="input" type="text" placeholder="Nuevo nombre…" maxlength="60">
+    <input id="modal-target-sid" type="hidden">
+    <div class="modal-actions">
+      <button class="btn btn-outline btn-sm" onclick="cerrarModal('modal-renombrar')">Cancelar</button>
+      <button class="btn btn-primary btn-sm" onclick="confirmarRenombrar()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- ════════════════════════════════════════════════════════════
+     JAVASCRIPT — ModeratorView (extiende AppCliente)
+════════════════════════════════════════════════════════════ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+/* ─────────────────────────────────────────────────────────
+   HostView / ModeratorView:
+   Hereda la lógica de AppCliente e incorpora los controles
+   exclusivos del moderador (gestión de lista, pausas, etc.)
+───────────────────────────────────────────────────────── */
+
+// ── Estado ───────────────────────────────────────────────
+
+const modState = {
+  socket:     null,
+  miSid:      null,
+  miPais:     null,
+  estadoSala: null,
+};
+
+let timerInterval = null;
+let timerEndTs    = null;
+let timerMaxSecs  = 0;
+
+// ── Conexión ─────────────────────────────────────────────
+
+function conexion() {
+  modState.socket = io({ transports: ['websocket', 'polling'] });
+  const sock = modState.socket;
+
+  sock.on('connect', () => {
+    modState.miSid = sock.id;
+    document.getElementById('conn-status').classList.add('connected');
+    document.getElementById('conn-label').textContent = 'Conectado';
+  });
+
+  sock.on('disconnect', () => {
+    document.getElementById('conn-status').classList.remove('connected');
+    document.getElementById('conn-label').textContent = 'Desconectado';
+    mostrarToast('Conexión perdida', 'error');
+  });
+
+  sock.on('bienvenida', (data) => {
+    modState.miSid  = data.sid;
+    modState.miPais = data.pais;
+
+    // Si no es moderador, redirigir a la vista de delegado
+    if (!data.es_moderador) {
+      window.location.href = '/delegado';
+      return;
+    }
+
+    document.getElementById('app-main').style.display = '';
+    document.getElementById('lobby-overlay').style.display = 'none';
+    mostrarToast('Sesión de moderador iniciada', 'success');
+  });
+
+  sock.on('estado_sala', (estado) => {
+    modState.estadoSala = estado;
+    actualizarVista(estado);
+  });
+
+  sock.on('tiempo_agotado', () => {
+    mostrarToast('Tiempo agotado — turno avanzado automáticamente', 'warning');
+  });
+
+  sock.on('error', (data) => {
+    mostrarToast(data.msg, 'error');
+  });
+}
+
+// ── Unirse ───────────────────────────────────────────────
+
+function unirseASala() {
+  const pais = document.getElementById('input-pais').value.trim();
+  if (!pais) {
+    document.getElementById('lobby-error').textContent = 'Ingresa un nombre.';
+    return;
+  }
+  modState.socket.emit('unirse_sala', { pais, sala: 'MAIN' });
+}
+
+// ── Acciones del Moderador ───────────────────────────────
+
+/** Avanza al siguiente turno manualmente */
+function llamarSiguiente() {
+  modState.socket.emit('llamar_siguiente', {});
+}
+
+/** Inserta una pausa en la posición indicada */
+function insertarPausa(posicion) {
+  modState.socket.emit('insertar_pausa', { posicion });
+  const labels = {
+    after_current:   'después del turno actual',
+    after_responses: 'después del bloque de réplicas',
+    end:             'al final de la cola',
+  };
+  mostrarToast(`Pausa insertada ${labels[posicion] || ''}`, 'warning');
+}
+
+/** Asigna un turno al SID seleccionado en el dropdown */
+function asignarTurno(tipo) {
+  const targetSid = document.getElementById('select-deleg-asignar').value;
+  if (!targetSid) {
+    mostrarToast('Selecciona una delegación primero', 'error');
+    return;
+  }
+  modState.socket.emit('asignar_turno', { target_sid: targetSid, tipo });
+  mostrarToast(`Turno ${tipo} asignado`, 'success');
+}
+
+/** Elimina un turno pendiente de la cola */
+function removerDeCola(turnoId) {
+  if (!confirm('¿Eliminar este turno de la cola?')) return;
+  modState.socket.emit('remover_de_cola', { turno_id: turnoId });
+}
+
+/** Abre el modal de renombrar */
+function abrirRenombrar(sid, nombreActual) {
+  document.getElementById('modal-target-sid').value  = sid;
+  document.getElementById('modal-nombre-input').value = nombreActual;
+  document.getElementById('modal-renombrar').classList.add('open');
+  document.getElementById('modal-nombre-input').focus();
+}
+
+function cerrarModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+
+function confirmarRenombrar() {
+  const sid    = document.getElementById('modal-target-sid').value;
+  const nombre = document.getElementById('modal-nombre-input').value.trim();
+  if (!nombre) return;
+  modState.socket.emit('renombrar_deleg', { target_sid: sid, nuevo_nombre: nombre });
+  cerrarModal('modal-renombrar');
+}
+
+/** Expulsa a una delegación */
+function expulsarDelegacion(sid, pais) {
+  if (!confirm(`¿Expulsar a la delegación "${pais}"?`)) return;
+  modState.socket.emit('expulsar_deleg', { target_sid: sid });
+}
+
+// ── Actualizar Vista ─────────────────────────────────────
+
+function actualizarVista(estado) {
+  const turnoActual  = estado.turno_actual;
+  const cola         = estado.lista_turnos || [];
+  const delegaciones = estado.delegaciones || {};
+
+  // Contadores
+  const nConectados = Object.keys(delegaciones).length;
+  document.getElementById('info-historial').textContent  = estado.total_historial || 0;
+  document.getElementById('info-conectados').textContent = nConectados;
+  document.getElementById('conn-count').textContent      = `${nConectados} conectado${nConectados !== 1 ? 's' : ''}`;
+
+  // ── Turno activo ──
+  if (turnoActual) {
+    document.getElementById('sin-turno-activo').style.display  = 'none';
+    document.getElementById('turno-activo-info').style.display = '';
+
+    document.getElementById('ta-nombre').textContent = turnoActual.pais;
+    document.getElementById('ta-sid').textContent    = turnoActual.socket_id.substring(0, 12) + '…';
+
+    const tipoBadge = document.getElementById('ta-tipo-badge');
+    tipoBadge.textContent = turnoActual.tipo;
+    tipoBadge.className   = 'delegacion-tipo tipo-' + turnoActual.tipo.toLowerCase().replace('é','e').replace('á','a');
+
+    // Estilo según tipo
+    const panelTA = document.getElementById('panel-turno-activo');
+    panelTA.className = turnoActual.tipo === 'Pausa'
+      ? 'panel panel-turno-activo turno-activo-panel pausa'
+      : 'panel panel-turno-activo turno-activo-panel';
+
+    // Timer
+    if (turnoActual.tipo === 'Pausa') {
+      detenerTimer();
+      document.getElementById('timer-display').textContent = '∞';
+      document.getElementById('timer-display').className   = 'timer-display pausa';
+      document.getElementById('timer-label').textContent   = 'pausa activa';
+      document.getElementById('timer-progress-fill').style.width = '100%';
+    } else if (estado.timer_running && estado.timer_end_ts) {
+      timerEndTs   = estado.timer_end_ts;
+      timerMaxSecs = turnoActual.duracion_max;
+      iniciarTimer();
+    }
+  } else {
+    document.getElementById('sin-turno-activo').style.display  = '';
+    document.getElementById('turno-activo-info').style.display = 'none';
+    detenerTimer();
+    document.getElementById('timer-display').textContent = '–:––';
+    document.getElementById('timer-display').className   = 'timer-display sin-turno';
+    document.getElementById('timer-progress-fill').style.width = '0%';
+  }
+
+  // ── Cola de turnos ──
+  renderizarCola(cola);
+
+  // ── Tabla de delegaciones ──
+  renderizarDelegaciones(delegaciones, estado.moderator_sid);
+
+  // ── Dropdown asignar turno ──
+  actualizarDropdownDelegaciones(delegaciones, estado.moderator_sid);
+}
+
+// ── Renderizar Cola (con controles de moderador) ─────────
+
+function renderizarCola(cola) {
+  const body = document.getElementById('cola-body');
+  document.getElementById('cola-total').textContent = `${cola.length} pendiente${cola.length !== 1 ? 's' : ''}`;
+
+  if (cola.length === 0) {
+    body.innerHTML = `<div class="empty-state" style="padding:1.5rem;"><p>La cola está vacía.</p></div>`;
+    return;
+  }
+
+  body.innerHTML = `<div class="queue-list">` +
+    cola.map((t, i) => {
+      const tipoCss = t.tipo.toLowerCase().replace('é','e').replace('á','a');
+      return `
+        <div class="queue-item">
+          <div class="queue-number">${i + 1}</div>
+          <div class="queue-pais">${t.pais}</div>
+          <span class="queue-tipo-badge tipo-${tipoCss}">${t.tipo}</span>
+          <div class="queue-actions">
+            <button
+              class="btn-icon remove"
+              title="Eliminar de la cola"
+              onclick="removerDeCola('${t.turno_id}')"
+            >✕</button>
+          </div>
+        </div>
+      `;
+    }).join('') +
+  `</div>`;
+}
+
+// ── Renderizar Tabla de Delegaciones ─────────────────────
+
+function renderizarDelegaciones(delegaciones, modSid) {
+  const wrapper = document.getElementById('tabla-delegaciones-wrapper');
+  const sids    = Object.keys(delegaciones);
+
+  document.getElementById('deleg-count').textContent = sids.length;
+
+  if (sids.length === 0) {
+    wrapper.innerHTML = `<div class="empty-state" style="padding:1.5rem;"><p>Sin delegaciones.</p></div>`;
+    return;
+  }
+
+  wrapper.innerHTML = `
+    <table class="deleg-table">
+      <thead>
+        <tr>
+          <th>Delegación</th>
+          <th>Rol</th>
+          <th style="text-align:right;">Acciones</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sids.map(sid => {
+          const pais  = delegaciones[sid];
+          const esMod = sid === modSid;
+          return `
+            <tr>
+              <td>
+                <span class="deleg-online-dot"></span>
+                ${pais}
+              </td>
+              <td>
+                ${esMod
+                  ? '<span class="badge-role mod">MOD</span>'
+                  : '<span class="badge-role dele" style="font-size:.65rem;">DEL</span>'
+                }
+              </td>
+              <td>
+                <div class="deleg-actions">
+                  ${!esMod ? `
+                    <button
+                      class="btn btn-outline btn-sm"
+                      title="Renombrar"
+                      onclick="abrirRenombrar('${sid}', '${pais.replace(/'/g, "\\'")}')"
+                    >✏️</button>
+                    <button
+                      class="btn btn-danger btn-sm"
+                      title="Expulsar"
+                      onclick="expulsarDelegacion('${sid}', '${pais.replace(/'/g, "\\'")}')"
+                    >✕</button>
+                  ` : '<span style="font-size:.72rem;color:var(--text-dim);">—</span>'}
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+// ── Actualizar Dropdown de Asignación ────────────────────
+
+function actualizarDropdownDelegaciones(delegaciones, modSid) {
+  const sel  = document.getElementById('select-deleg-asignar');
+  const prev = sel.value;  // Mantener selección actual si sigue conectada
+
+  sel.innerHTML = '<option value="">— seleccionar delegación —</option>' +
+    Object.entries(delegaciones)
+      .filter(([sid]) => sid !== modSid)  // El moderador no se asigna a sí mismo
+      .map(([sid, pais]) =>
+        `<option value="${sid}" ${sid === prev ? 'selected' : ''}>${pais}</option>`
+      ).join('');
+}
+
+// ── Timer Local ──────────────────────────────────────────
+
+function iniciarTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    const ahora    = Date.now() / 1000;
+    const restante = Math.max(0, timerEndTs - ahora);
+    const display  = document.getElementById('timer-display');
+    const fill     = document.getElementById('timer-progress-fill');
+
+    const mins = Math.floor(restante / 60);
+    const secs = Math.floor(restante % 60);
+    display.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+    const pct = timerMaxSecs > 0 ? restante / timerMaxSecs : 1;
+    if (pct <= 0.15) {
+      display.className = 'timer-display critical';
+      fill.className    = 'timer-progress-fill critical';
+    } else if (pct <= 0.35) {
+      display.className = 'timer-display warning';
+      fill.className    = 'timer-progress-fill warning';
+    } else {
+      display.className = 'timer-display';
+      fill.className    = 'timer-progress-fill';
+    }
+
+    fill.style.width = (pct * 100) + '%';
+    document.getElementById('timer-label').textContent =
+      `${Math.round(restante)}s restantes`;
+
+    if (restante <= 0) {
+      display.textContent = '0:00';
+      detenerTimer();
+    }
+  }, 500);
+}
+
+function detenerTimer() {
+  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+}
+
+// ── Toast ─────────────────────────────────────────────────
+
+function mostrarToast(msg, tipo = 'info') {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = `toast ${tipo}`;
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────
+
+document.addEventListener('keydown', (e) => {
+  // Ctrl/Cmd + → : Siguiente turno
+  if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowRight') {
+    llamarSiguiente();
+    e.preventDefault();
+  }
+  // Enter en modal
+  if (e.key === 'Enter' && document.getElementById('modal-renombrar').classList.contains('open')) {
+    confirmarRenombrar();
+  }
+  // Escape cierra modales
+  if (e.key === 'Escape') {
+    cerrarModal('modal-renombrar');
+  }
+});
+
+document.getElementById('input-pais').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') unirseASala();
+});
+
+// ── Inicialización ────────────────────────────────────────
+conexion();
+</script>
+
+</body>
+</html>
