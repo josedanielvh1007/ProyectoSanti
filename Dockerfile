@@ -33,7 +33,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt \ 
+    pip install fastapi -y
 
 # ── Copiar el código fuente ────────────────────────────────
 COPY app/ ./app/
@@ -57,8 +58,8 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 # --workers 1     → IMPORTANTE: un solo worker para compartir estado en memoria
 #                   (múltiples workers necesitarían Redis para sincronizar)
 CMD ["uvicorn", "main:socket_app", \
-     "--app-dir", "/app-debate/app", \
-     "--host", "0.0.0.0", \
-     "--port", "8000", \
-     "--workers", "1", \
-     "--log-level", "info"]
+    "--app-dir", "/app-debate/app", \
+    "--host", "0.0.0.0", \
+    "--port", "8000", \
+    "--workers", "1", \
+    "--log-level", "info"]
