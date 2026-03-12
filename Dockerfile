@@ -33,8 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \ 
-    pip install fastapi -y
+    pip install --no-cache-dir -r requirements.txt
 
 # ── Copiar el código fuente ────────────────────────────────
 COPY app/ ./app/
