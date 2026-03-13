@@ -1,0 +1,17 @@
+{
+    "name": "Debate Manager",
+    "image": "debate-manager:latest",
+    "workspaceFolder": "/home/vscode/workspace",
+    "workspaceMount": "source=${localWorkspaceFolder},target=/home/vscode/workspace,type=bind",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-toolsai.jupyter",
+                "ms-toolsai.jupyter-keymap",
+                "ms-toolsai.jupyter-renderers"
+            ]
+        }
+    }
+}
